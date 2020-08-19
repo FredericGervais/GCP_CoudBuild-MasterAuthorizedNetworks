@@ -1,0 +1,81 @@
+
+
+
+steps:
+- id: "Add the public IP to the Authorized Networks"
+  name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  entrypoint: /bin/bash
+  args:
+    - -c 
+    - |
+      #
+      # Install dependencies
+      #
+      apt-get update -y &&
+      apt-get install -y dnsutils jq &&
+      
+      #
+      # Get the Public IP
+      #
+      export build_public_ip=$(dig TXT +short o-o.myaddr.l.google.com @ns1.google.com | sed  's/\"//g') &&
+      echo "Public IP : $build_public_ip" &&
+      
+      #
+      # Get the current Authorized Networks
+      #
+      export build_authorized_networks=$(gcloud container clusters describe ${_CLOUDSDK_CONTAINER_CLUSTER} --zone ${_CLOUDSDK_COMPUTE_ZONE} --format="json" | jq -r '.masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock' | sed -z 's/\n/,/g' | sed -z 's/,$//g') &&
+      echo "AuthorizedNetworks : $build_authorized_networks" &&
+      
+      #
+      # Add the public IP to the Authorized Networks
+      #
+      gcloud container clusters update ${_CLOUDSDK_CONTAINER_CLUSTER} --zone ${_CLOUDSDK_COMPUTE_ZONE} --enable-master-authorized-networks --master-authorized-networks $(echo $build_authorized_networks),$(echo $build_public_ip)/32 &&
+      
+      #
+      # write all "build_" variables to the persistent volume "/workspace"
+      #
+      env | grep "^build_" > /workspace/build_vars
+      
+- id: "Interact with the Pods"
+  name: gcr.io/cloud-builders/gke-deploy
+  args:
+  - run
+  - --filename=nginx.yaml
+  - --location=${_CLOUDSDK_COMPUTE_ZONE}
+  - --cluster=${_CLOUDSDK_CONTAINER_CLUSTER}
+
+- id: "Restore the original Authorized Networks"
+  name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  entrypoint: /bin/bash
+  args:
+    - -c
+    - |
+      # Read environment variables from disk
+      source /workspace/build_vars &&
+      
+      #
+      # Install dependencies
+      #
+      apt-get update -y &&
+      apt-get install -y jq &&
+
+      # In case the list of Authorized Networks changed in the mean time, we will only remove the public IP from the current list and not restore the original Authorized Networks
+      
+      # Get the current Authorized Networks
+      export build_authorized_networks=$(gcloud container clusters describe ${_CLOUDSDK_CONTAINER_CLUSTER} --zone ${_CLOUDSDK_COMPUTE_ZONE} --format="json" | jq -r '.masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock' | sed -z 's/\n/,/g' | sed -z 's/,$//g') &&
+      echo "Current Authorized Networks : $build_authorized_networks" &&
+
+      # Remove the public IP
+      echo "Range to remove             : $build_public_ip/32" &&
+      export build_authorized_networks=$(echo $build_authorized_networks | sed -e "s/$(echo $build_public_ip)\/32//" -e "s/,,/,/" -e "s/^,//" -e "s/,$//") &&
+      echo "New Authorized Networks     : $build_authorized_networks" &&
+      
+      # Update the cluster
+      echo "Updating Cluster ..." &&
+      gcloud container clusters update ${_CLOUDSDK_CONTAINER_CLUSTER} --zone ${_CLOUDSDK_COMPUTE_ZONE} --enable-master-authorized-networks --master-authorized-networks $(echo $build_authorized_networks)
+
+
+
+
+
+
